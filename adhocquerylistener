@@ -1,0 +1,63 @@
+//this is very much inspired by Luca Canali's work on spark measurement, but I had a different environment and goals, so I wrote something a bit different...
+
+case class ExecutorAddee (executorId: String
+                      , timeAdded: Long
+                      , totalCores: Int
+                      , logUrl: String)
+
+case class ExecutorRemovee (executorId: String
+                      , timeRemoved: Long
+                      , reason: String)
+
+case class TaskEndee (stageId: Int
+					  , stageAttemptId: Int
+				    , taskType: String
+					  , taskId: Long
+					  , index: Int
+					  , attemptNumber: Int
+					  , launchTime: Long
+					  , executorId: String
+					  , host: String
+					  , finishTime: Long)					  
+
+class AdhocQueryListener extends org.apache.spark.scheduler.SparkListener {
+
+  val ExecutorAddeeData: scala.collection.mutable.ListBuffer[ExecutorAddee] = scala.collection.mutable.ListBuffer.empty[ExecutorAddee]
+  override def onExecutorAdded(executorAdded: org.apache.spark.scheduler.SparkListenerExecutorAdded) {
+    ExecutorAddeeData += ExecutorAddee(executorAdded.executorId, executorAdded.time, executorAdded.executorInfo.totalCores, executorAdded.executorInfo.logUrlMap("stderr"))
+  }
+
+  val ExecutorRemoveeData: scala.collection.mutable.ListBuffer[ExecutorRemovee] = scala.collection.mutable.ListBuffer.empty[ExecutorRemovee]
+    override def onExecutorRemoved(executorRemoved: org.apache.spark.scheduler.SparkListenerExecutorRemoved) {
+    ExecutorRemoveeData += ExecutorRemovee(executorRemoved.executorId, executorRemoved.time, executorRemoved.reason)
+  }
+
+  val TaskEndeeData: scala.collection.mutable.ListBuffer[TaskEndee] = scala.collection.mutable.ListBuffer.empty[TaskEndee]
+    override def onTaskEnd(TaskEnd: org.apache.spark.scheduler.SparkListenerTaskEnd) {
+    TaskEndeeData += TaskEndee(TaskEnd.stageId, TaskEnd.stageAttemptId, TaskEnd.taskType, TaskEnd.taskInfo.taskId, TaskEnd.taskInfo.index, TaskEnd.taskInfo.attemptNumber, TaskEnd.taskInfo.launchTime, TaskEnd.taskInfo.executorId, TaskEnd.taskInfo.host, TaskEnd.taskInfo.finishTime)
+  }
+
+  override def onJobStart(jobStart: org.apache.spark.scheduler.SparkListenerJobStart) {
+    println(s"Job started with ${jobStart.stageInfos.size} stages: $jobStart")
+  }
+
+  override def onStageCompleted(stageCompleted: org.apache.spark.scheduler.SparkListenerStageCompleted): Unit = {
+    println(s"Stage ${stageCompleted.stageInfo.stageId} completed with ${stageCompleted.stageInfo.numTasks} tasks.")
+  }
+}
+
+val listenerExec = new AdhocQueryListener
+spark.sparkContext.addSparkListener(listenerExec)
+val hivectxt = new org.apache.spark.sql.hive.HiveContext(sc)
+
+hivectxt.sql("select something from somewhere").show
+
+//listenerExec.ExecutorAddeeData.toDF.collect.foreach(println)
+//listenerExec.ExecutorRemoveeData.toDF.collect.foreach(println)
+//listenerExec.TaskEndeeData.toDF.collect.foreach(println)
+
+listenerExec.ExecutorRemoveeData.toDF.createOrReplaceTempView("executorremoved")
+listenerExec.ExecutorAddeeData.toDF.createOrReplaceTempView("executoradded")
+listenerExec.TaskEndeeData.toDF.createOrReplaceTempView("taskdata")
+
+spark.sql("select a.executorId, timeAdded, timeRemoved, b.logUrl, stageId, stageAttemptId, taskType, taskId, index, attemptNumber, launchTime, host, finishTime from executorremoved a left outer join executoradded b on a.executorId=b.executorId full outer join taskdata c on c.executorId = a.executorId").repartition(1).write.format("csv").option("header", "true").save("testing123")
